@@ -20,7 +20,7 @@ import (
 
 // Exercises the ordinary server Start path, including both actual listeners.
 func TestOrdinaryA2AStdio(t *testing.T) {
-	if os.Getenv("T807_A2A_STDIO_HELPER") == "1" {
+	if os.Getenv("POC_A2A_STDIO_HELPER") == "1" {
 		s, err := NewA2AServer(a2atype.AgentCard{}, substrateExecutor{}, slog.New(slog.DiscardHandler), ServerConfig{Host: "127.0.0.1", Port: "80", ShutdownTimeout: time.Second})
 		if err != nil {
 			panic(err)
@@ -36,7 +36,7 @@ func TestOrdinaryA2AStdio(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestOrdinaryA2AStdio$")
-	cmd.Env = append(os.Environ(), "T807_A2A_STDIO_HELPER=1", "RUNTIME_CONTROL_STDIO=1")
+	cmd.Env = append(os.Environ(), "POC_A2A_STDIO_HELPER=1", "RUNTIME_CONTROL_STDIO=1")
 	input, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
