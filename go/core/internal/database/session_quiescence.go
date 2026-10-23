@@ -1,6 +1,7 @@
 package database
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 
@@ -156,5 +157,43 @@ func (c *Client) FinishSessionQuiescence(ctx context.Context, work *SessionQuies
 		return execSQL(ctx, tx, `
 			UPDATE session_task_event SET quiescence_pending = FALSE WHERE sequence = $1
 		`, work.Version)
+	})
+}
+
+// FinishGovernedSessionIdle records no native transition and no snapshot. The
+// exact requirement, Actor UID and READY state remain untouched. Only this
+// already-settled task's claimed idle marker is released, preserving the gate
+// against stale or policy-free callers. Explicit snapshots remain unsupported.
+func (c *Client) FinishGovernedSessionIdle(ctx context.Context, work *SessionQuiescence) error {
+	if work == nil || work.Session == nil || work.ExecutorID == uuid.Nil {
+		return ErrFailedPrecondition
+	}
+	return c.withTx(ctx, func(tx pgx.Tx) error {
+		row, err := lockSession(ctx, tx, work.Session.Id)
+		if err != nil {
+			return notFoundOr(err)
+		}
+		value, err := toSession(row)
+		if err != nil {
+			return err
+		}
+		if len(value.ExecutionRequirement) == 0 || !bytes.Equal(value.ExecutionRequirement, work.Session.ExecutionRequirement) || row.State != "RUNTIME_STATE_READY" || row.Operation != "RUNTIME_OPERATION_NONE" {
+			return ErrFailedPrecondition
+		}
+		type idle struct {
+			Pending bool
+			State   string
+		}
+		event, err := queryOne(ctx, tx, `SELECT e.quiescence_pending AS pending,t.state FROM session_task_event e JOIN session_task t ON t.history_id=e.history_id AND t.id=e.task_id WHERE e.sequence=$1 AND e.history_id=$2 AND e.task_id=$3 AND e.quiescence_executor_id=$4 AND e.published`, pgx.RowToStructByName[idle], work.Version, row.HistoryID, work.TaskID, work.ExecutorID)
+		if err != nil {
+			return notFoundOr(err)
+		}
+		if event.State != string(work.State) {
+			return ErrConflict
+		}
+		if !event.Pending {
+			return nil
+		}
+		return execSQL(ctx, tx, `UPDATE session_task_event SET quiescence_pending=FALSE WHERE sequence=$1`, work.Version)
 	})
 }

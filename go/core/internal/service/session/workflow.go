@@ -53,6 +53,9 @@ func NewActorWorkflow(store workflowStore, actors actorClient, quiescenceWake ch
 // logical READY state and records its external snapshot URI. Only a checkpoint
 // retains a copy after the Actor advances.
 func (w *ActorWorkflow) Quiesce(ctx context.Context, session *apiv1.Session) (*database.SessionTaskSnapshot, error) {
+	if len(session.GetExecutionRequirement()) != 0 {
+		return nil, fmt.Errorf("governed checkpoint unsupported; no compute changed")
+	}
 	revision, err := w.store.GetRuntimeRevision(ctx, session.GetPreparedRevision())
 	if err != nil {
 		return nil, fmt.Errorf("load prepared revision: %w", err)
@@ -158,11 +161,13 @@ func (w *ActorWorkflow) execute(ctx context.Context, operation *database.Session
 		tagName = "checkpoint-" + operation.SourceCheckpointID.String()
 	}
 
-	binding := substrate.ActorBinding{Revision: revision.Revision, Atespace: revision.ActorTemplateAtespace, Name: substrate.ActorName(session.Id),
+	binding := substrate.ActorBinding{ExecutionRequirement: append([]byte(nil), session.GetExecutionRequirement()...), Revision: revision.Revision, Atespace: revision.ActorTemplateAtespace, Name: substrate.ActorName(session.Id),
 		TemplateAtespace: revision.ActorTemplateAtespace, TemplateName: revision.ActorTemplateName}
 	var creation *substrate.ActorCreation
 	if kind == apiv1.RuntimeOperation_RUNTIME_OPERATION_CREATE {
-		creation = &substrate.ActorCreation{}
+		// Pinned ingress is observation-only and cannot cold-start governed compute.
+		// Start it under this durable lifecycle claim before publishing READY.
+		creation = &substrate.ActorCreation{OperationID: operation.ID.String(), ExecutionRequirement: append([]byte(nil), session.GetExecutionRequirement()...), Resume: len(session.GetExecutionRequirement()) > 0}
 		if snapshot != nil {
 			creation.Snapshot = &substrate.ActorSnapshot{Tag: &ateapipb.ObjectRef{Atespace: snapshot.Atespace, Name: tagName}, URI: snapshot.URI, ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA}
 		}
@@ -204,6 +209,17 @@ func (w *ActorWorkflow) execute(ctx context.Context, operation *database.Session
 		err = errors.Join(err, w.store.ReleaseRuntimeOperation(finishCtx, sessionID, operation.ID, executorID))
 	}()
 	if err := substrate.ApplyActorTransition(ctx, w.actors, transition); err != nil {
+		if kind == apiv1.RuntimeOperation_RUNTIME_OPERATION_CREATE && errors.Is(err, substrate.ErrCreateRetired) {
+			finisher, ok := w.store.(interface {
+				FinishRetiredSessionCreate(context.Context, string, uuid.UUID, uuid.UUID) (*apiv1.Session, error)
+			})
+			if !ok {
+				return nil, fmt.Errorf("confirmed retired Create has no terminal store support: %w", err)
+			}
+			finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			return finisher.FinishRetiredSessionCreate(finishCtx, sessionID, operation.ID, executorID)
+		}
 		return nil, fmt.Errorf("lifecycle operation %s remains pending: %w", operation.ID, err)
 	}
 	var authority string
@@ -248,7 +264,7 @@ func operationOutcome(operation *database.SessionOperation) (*apiv1.Session, err
 // templates alone also match an externally replaced actor, which we must not
 // adopt or checkpoint as this session's runtime.
 func (w *ActorWorkflow) verifyActor(ctx context.Context, session *apiv1.Session, revision *database.RuntimeRevision, actor *ateapipb.Actor) error {
-	if !validActorIdentity(actor, revision, substrate.ActorName(session.Id)) {
+	if !validActorIdentity(actor, revision, substrate.ActorName(session.Id)) || string(actor.GetExecutionRequirement()) != string(session.GetExecutionRequirement()) {
 		return fmt.Errorf("runtime actor identity or template changed")
 	}
 	if _, err := w.store.GetSessionForRuntime(ctx, session.Id, actor.GetMetadata().GetUid()); err != nil {

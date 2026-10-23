@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -91,6 +92,16 @@ func NewService(store store, authorizer auth.Authorizer, workflow sessionWorkflo
 // name leaves the conversation identified by its id, which is how every session
 // created before names existed behaves.
 func (s *Service) Create(ctx context.Context, agent *apiv1.ResourceReference, requestID, name string) (*apiv1.Session, error) {
+	return s.CreateWithRequirement(ctx, agent, requestID, name, nil)
+}
+
+// CreateWithRequirement freezes complete input in the same durable request reservation.
+func (s *Service) CreateWithRequirement(ctx context.Context, agent *apiv1.ResourceReference, requestID, name string, raw []byte) (*apiv1.Session, error) {
+	raw = append([]byte(nil), raw...)
+	if len(raw) > 1<<20 || (len(raw) > 0 && !json.Valid(raw)) {
+		return nil, serviceerrors.NewInvalidArgument("malformed complete execution requirement", nil)
+	}
+
 	if err := validateCreate(agent, requestID); err != nil {
 		return nil, err
 	}
@@ -108,7 +119,8 @@ func (s *Service) Create(ctx context.Context, agent *apiv1.ResourceReference, re
 	}
 	session, _, err := s.store.CreateSession(ctx, &apiv1.Session{
 		Id: id.String(), Creator: creator, Name: name,
-		Agent: agent,
+		Agent:                agent,
+		ExecutionRequirement: raw,
 	}, requestID)
 	if errors.Is(err, database.ErrIdempotencyConflict) {
 		return nil, serviceerrors.NewAlreadyExists("request_id was already used for a different Session", err)
@@ -131,6 +143,16 @@ func (s *Service) Create(ctx context.Context, agent *apiv1.ResourceReference, re
 	}
 	if err != nil {
 		return nil, serviceerrors.NewUnavailable("Failed to create Session", err)
+	}
+	// A retired failed Create can converge successfully for cleanup. That is
+	// not execution readiness and must never be returned as successful Create.
+	// Reads and Delete retain the durable tombstone; no replacement is started.
+	// Idempotent retry of an already suspended Session is an observation, not
+	// a new release. Preserve that established behavior without reissuing work.
+	settled := session.GetState() == apiv1.RuntimeState_RUNTIME_STATE_READY ||
+		session.GetState() == apiv1.RuntimeState_RUNTIME_STATE_SUSPENDED
+	if session == nil || !settled || session.GetOperation() != apiv1.RuntimeOperation_RUNTIME_OPERATION_NONE {
+		return nil, serviceerrors.NewFailedPrecondition("Session creation has no settled live execution", nil)
 	}
 	return session, nil
 }

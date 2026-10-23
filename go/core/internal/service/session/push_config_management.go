@@ -29,6 +29,9 @@ func (s *InteractionService) CreateTaskPushConfig(ctx context.Context, agent typ
 	if err != nil {
 		return nil, err
 	}
+	if len(session.GetExecutionRequirement()) != 0 {
+		return nil, a2a.NewError(a2a.ErrUnsupportedOperation, "governed push delivery is unsupported")
+	}
 	if config.ID == "" {
 		// Give this explicit Create a stable public ID before it reaches the store.
 		config.ID = uuid.NewString()

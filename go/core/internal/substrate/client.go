@@ -186,6 +186,21 @@ func (c *Client) createActor(ctx context.Context, atespace, actorID, tmplNS, tmp
 	return resp, nil
 }
 
+// ResumeActorExact supplies the owning control-plane incarnation precondition.
+// A post-response identity check cannot prevent a replaced Actor from booting.
+func (c *Client) ResumeActorExact(ctx context.Context, atespace, actorID, uid string) (*ateapipb.Actor, error) {
+	if uid == "" {
+		return nil, fmt.Errorf("exact resume requires Actor UID")
+	}
+	ctx, cancel := c.callCtx(ctx)
+	defer cancel()
+	response, err := c.ControlClient.ResumeActor(ctx, &ateapipb.ResumeActorRequest{Actor: actorRef(atespace, actorID), ActorUid: uid})
+	if err != nil {
+		return nil, err
+	}
+	return response.GetActor(), nil
+}
+
 func (c *Client) ResumeActor(ctx context.Context, atespace, actorID string) (*ateapipb.Actor, error) {
 	ctx, cancel := c.callCtx(ctx)
 	defer cancel()
@@ -256,4 +271,35 @@ func (c *Client) EnsureAtespace(ctx context.Context, name string) error {
 		return nil
 	}
 	return err
+}
+
+// CreateActorWithRequirement freezes the complete mandatory input before native compute.
+func (c *Client) CreateActorWithRequirement(ctx context.Context, atespace, actorID, tmplNS, tmplName string, raw []byte) (*ateapipb.Actor, error) {
+	ctx, cancel := c.callCtx(ctx)
+	defer cancel()
+	return c.ControlClient.CreateActor(ctx, &ateapipb.CreateActorRequest{Actor: &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: actorID}, ActorTemplate: actorRef(tmplNS, tmplName), ExecutionRequirement: append([]byte(nil), raw...)}})
+}
+
+// TerminateActor destroys exactly the observed Actor without requiring a
+// snapshot. Substrate checks UID under its native lease before compute effects.
+func (c *Client) TerminateActor(ctx context.Context, atespace, name, uid string) error {
+	if uid == "" {
+		return fmt.Errorf("exact Actor UID is required")
+	}
+	ctx, cancel := c.callCtx(ctx)
+	defer cancel()
+	_, err := c.ControlClient.DeleteActor(ctx, &ateapipb.DeleteActorRequest{Actor: actorRef(atespace, name), AnyState: true, Options: &ateapipb.DeleteOptions{Uid: uid}})
+	return err
+}
+
+// CreateActorOperation binds the durable lifecycle generation to the normalized
+// original suspended Actor in the existing owning store. Retirement is an
+// irreversible cleanup barrier, never current activation or release evidence.
+func (c *Client) CreateActorOperation(ctx context.Context, b ActorBinding, id string, raw []byte, retire bool) (*ateapipb.Actor, error) {
+	if id == "" || len(raw) == 0 {
+		return nil, fmt.Errorf("governed create operation requires durable ID and requirement")
+	}
+	ctx, cancel := c.callCtx(ctx)
+	defer cancel()
+	return c.ControlClient.CreateActor(ctx, &ateapipb.CreateActorRequest{OperationId: id, RetireOperation: retire, Actor: &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Atespace: b.Atespace, Name: b.Name}, ActorTemplate: actorRef(b.TemplateAtespace, b.TemplateName), ExecutionRequirement: append([]byte(nil), raw...)}})
 }

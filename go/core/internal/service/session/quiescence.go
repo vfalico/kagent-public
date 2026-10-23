@@ -73,6 +73,24 @@ func (w *ActorWorkflow) Start(ctx context.Context) error {
 }
 
 func (w *ActorWorkflow) quiesceIdleSession(ctx context.Context, work *database.SessionQuiescence) {
+	// An unsupported governed checkpoint is a certain pre-effect refusal,
+	// not an uncertain native suspension. Keep its existing exact protection and
+	// release only this idle journal claim without inventing a snapshot.
+	if len(work.Session.GetExecutionRequirement()) > 0 {
+		store, ok := w.store.(interface {
+			FinishGovernedSessionIdle(context.Context, *database.SessionQuiescence) error
+		})
+		if !ok {
+			logging.FromContext(ctx).ErrorContext(ctx, "governed idle outcome store unsupported", "session_id", work.Session.Id)
+			return
+		}
+		finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := store.FinishGovernedSessionIdle(finishCtx, work); err != nil {
+			logging.FromContext(ctx).ErrorContext(ctx, "record protected active idle outcome", "session_id", work.Session.Id, "error", err)
+		}
+		return
+	}
 	runtimeCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	snapshot, err := w.Quiesce(runtimeCtx, work.Session)
 	cancel()

@@ -173,6 +173,7 @@ func (c *Compiler) compileConfiguration(ctx context.Context, agent *v1alpha3.Age
 	result.AgentName = agent.Name
 	result.Image = image
 	result.SandboxClass = (*workerPool).Spec.SandboxClass
+	result.ColdStartOnly = harness.Spec.Substrate.SnapshotPolicy.ColdStartOnly
 	// Shared agents and plugin selections can contribute the same image.
 	// Normalize once after the complete harness configuration has been compiled.
 	slices.Sort(result.SkillImages)

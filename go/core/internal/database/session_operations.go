@@ -223,3 +223,52 @@ func toSessionOperation(row sessionRow) (*SessionOperation, error) {
 	}
 	return &SessionOperation{RuntimeOperation: runtimeOperationFor(row.runtimeInstanceRow, session), SourceCheckpointID: row.SourceCheckpointID}, nil
 }
+
+// FinishRetiredSessionCreate publishes only irreversible cleanup, never READY.
+// Called after owning retirement + exact original termination, while holding
+// this generation's claim. An obsolete executor cannot erase a retry or delete
+// a subsequently created Session. The original creation receipt stays tombstoned.
+func (c *Client) FinishRetiredSessionCreate(ctx context.Context, sessionID string, id, executorID uuid.UUID) (*apiv1.Session, error) {
+	var result *apiv1.Session
+	err := c.withTx(ctx, func(tx pgx.Tx) error {
+		row, err := lockSession(ctx, tx, sessionID)
+		if err != nil {
+			return notFoundOr(err)
+		}
+		if id == uuid.Nil || executorID == uuid.Nil || row.OperationID == nil || *row.OperationID != id || row.ExecutorID == nil || *row.ExecutorID != executorID || row.Operation != apiv1.RuntimeOperation_RUNTIME_OPERATION_CREATE.String() || row.State != apiv1.RuntimeState_RUNTIME_STATE_CREATING.String() {
+			return ErrConflict
+		}
+		result, err = toSession(row)
+		if err != nil {
+			return err
+		}
+		if len(result.ExecutionRequirement) == 0 {
+			return ErrFailedPrecondition
+		}
+		if err = releaseAgentRuntimeReferences(ctx, tx, row.ID); err != nil {
+			return err
+		}
+		row.State = apiv1.RuntimeState_RUNTIME_STATE_DELETED.String()
+		row.Operation = apiv1.RuntimeOperation_RUNTIME_OPERATION_NONE.String()
+		row.PreparedRevision = nil
+		row.ExecutorID = nil
+		result.State = apiv1.RuntimeState_RUNTIME_STATE_DELETED
+		result.Operation = apiv1.RuntimeOperation_RUNTIME_OPERATION_NONE
+		result.PreparedRevision = ""
+		result.A2AAuthority = ""
+		result.UpdatedAt = timestamppb.Now()
+		result.Failure = &apiv1.Failure{Reason: "CreationRetired", Message: "original governed creation retired without execution authority"}
+		row.Data, err = marshalSession(result)
+		if err != nil {
+			return err
+		}
+		if err = saveRuntimeLifecycle(ctx, tx, row.runtimeInstanceRow, runtimeKindAgent); err != nil {
+			return err
+		}
+		return execSQL(ctx, tx, `UPDATE session SET data=$2 WHERE id=$1`, row.ID, row.Data)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("finish retired Session create: %w", err)
+	}
+	return result, nil
+}

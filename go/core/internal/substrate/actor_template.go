@@ -110,6 +110,7 @@ func ActorTemplateForRevision(spec *translator.Revision, revisionID translator.R
 		}},
 		WorkerSelector: workerSelectorForPool(workerKey),
 		SnapshotConfig: &ateapipb.SnapshotConfig{
+			ColdStartOnly:   spec.ColdStartOnly,
 			StorageLocation: spec.SnapshotLocation,
 			OnCommit:        ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA,
 		},
@@ -250,4 +251,11 @@ func sandboxConfigForClass(class atev1alpha1.SandboxClass) (*ateapipb.SandboxCon
 	default:
 		return nil, fmt.Errorf("unsupported sandbox class %q", class)
 	}
+}
+
+// ActorTemplatePrepared accepts a server-observed immutable cold-start template
+// without inventing a golden tag. Cold-only creation still owns per-Actor held
+// launch and exact mandatory requirement activation before execution.
+func ActorTemplatePrepared(t *ateapipb.ActorTemplate) bool {
+	return t != nil && (t.GetSnapshotConfig().GetColdStartOnly() || t.GetStatus().GetGoldenSnapshotStatus().GetGoldenTag() != nil)
 }

@@ -63,6 +63,10 @@ func (c *Client) ForkSession(ctx context.Context, checkpointID, userID, requestI
 		if err != nil {
 			return err
 		}
+		// Checkpoint admission rejects governed sources before persistence.
+		// A retained ungoverned checkpoint can outlive idle source deletion;
+		// never require a live parent row to fork its frozen history.
+
 		if checkpoint.PreparedRevision == nil {
 			return fmt.Errorf("checkpoint %s has no fork source", checkpointID)
 		}
@@ -214,8 +218,12 @@ func (c *Client) ReserveSessionCheckpoint(ctx context.Context, checkpoint *apiv1
 			return fmt.Errorf("lock Session %s: %w", checkpoint.GetSessionId(), err)
 		}
 		// Decoding rejects a corrupt stored session before it becomes a checkpoint source.
-		if _, err := toSession(session); err != nil {
+		decoded, err := toSession(session)
+		if err != nil {
 			return err
+		}
+		if len(decoded.GetExecutionRequirement()) != 0 {
+			return fmt.Errorf("governed checkpoint unsupported: %w", ErrFailedPrecondition)
 		}
 		if session.State != apiv1.RuntimeState_RUNTIME_STATE_READY.String() || session.Operation != apiv1.RuntimeOperation_RUNTIME_OPERATION_NONE.String() {
 			return fmt.Errorf("session %s cannot checkpoint in state %s with operation %s: %w", checkpoint.GetSessionId(), session.State, session.Operation, ErrConflict)

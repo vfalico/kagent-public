@@ -3,12 +3,14 @@ package server
 import (
 	"context"
 	"fmt"
+	"github.com/kagent-dev/kagent/go/pkg/controlstdio"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -60,6 +62,7 @@ type A2AServer struct {
 	logger       *slog.Logger
 	config       ServerConfig
 	listenErr    chan error
+	control      *controlstdio.Mux
 }
 
 // NewA2AServer creates a new A2A server using a2asrv.
@@ -228,16 +231,45 @@ func (s *A2AServer) Start() error {
 
 	// Substrate may snapshot immediately after /readyz succeeds. Bind A2A
 	// before exposing readiness so that snapshot always contains its listener.
-	listener, err := net.Listen("tcp", s.httpServer.Addr)
-	if err != nil {
-		return fmt.Errorf("listen for A2A: %w", err)
+	var listener, ready net.Listener
+	var err error
+	if os.Getenv("RUNTIME_CONTROL_STDIO") == "1" {
+		_, port, parseErr := net.SplitHostPort(s.httpServer.Addr)
+		value, parseErr2 := strconv.ParseUint(port, 10, 16)
+		if parseErr != nil || parseErr2 != nil || value == 0 {
+			return fmt.Errorf("invalid runtime control A2A listener")
+		}
+		control := controlstdio.New(false, os.Stdin, os.Stdout, func() error { os.Stdin.Close(); return os.Stdout.Close() })
+		listener, err = control.Listen(uint16(value))
+		if err != nil {
+			control.Close()
+			return err
+		}
+		ready, err = control.Listen(8081)
+		if err != nil {
+			control.Close()
+			return err
+		}
+		s.control = control
+	} else {
+		listener, err = net.Listen("tcp", s.httpServer.Addr)
+		if err != nil {
+			return fmt.Errorf("listen for A2A: %w", err)
+		}
+		ready, err = net.Listen("tcp", s.readyServer.Addr)
+		if err != nil {
+			listener.Close()
+			return fmt.Errorf("listen for readiness: %w", err)
+		}
 	}
-	ready, err := net.Listen("tcp", s.readyServer.Addr)
-	if err != nil {
-		_ = listener.Close()
-		return fmt.Errorf("listen for readiness: %w", err)
+	s.listenErr = make(chan error, 3)
+	if s.control != nil {
+		go func() {
+			if err := s.control.Serve(); err != nil {
+				s.listenErr <- fmt.Errorf("runtime control closed: %w", err)
+			}
+		}()
 	}
-	s.listenErr = make(chan error, 2)
 	go func() {
 		if err := s.httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
 			s.listenErr <- err
@@ -255,6 +287,9 @@ func (s *A2AServer) Start() error {
 // WaitForShutdown blocks until a shutdown signal is received or the listener
 // fails, then gracefully shuts down.
 func (s *A2AServer) WaitForShutdown() error {
+	if s.control != nil {
+		defer s.control.Close()
+	}
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 

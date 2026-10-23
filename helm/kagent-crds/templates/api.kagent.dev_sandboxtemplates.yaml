@@ -110,6 +110,12 @@ spec:
                   snapshotPolicy:
                     description: SnapshotPolicy configures runtime snapshot storage.
                     properties:
+                      coldStartOnly:
+                        description: |-
+                          ColdStartOnly opts out of executable snapshots. Each session starts a fresh
+                          container and still requires activation before any governed execution.
+                          This immutable revision input is not inferred from a WorkerPool class.
+                        type: boolean
                       location:
                         description: Location is the snapshot storage location used
                           by Substrate.

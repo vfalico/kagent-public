@@ -21,6 +21,12 @@ type RuntimeEnvVar struct {
 
 // RuntimeSnapshotPolicy configures storage for Substrate snapshots.
 type RuntimeSnapshotPolicy struct {
+	// ColdStartOnly opts out of executable snapshots. Each session starts a fresh
+	// container and still requires activation before any governed execution.
+	// This immutable revision input is not inferred from a WorkerPool class.
+	// +optional
+	ColdStartOnly bool `json:"coldStartOnly,omitempty"`
+
 	// Location is the snapshot storage location used by Substrate.
 	// +kubebuilder:validation:Pattern=`^[^[:space:]]+$`
 	// +required

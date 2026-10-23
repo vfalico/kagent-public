@@ -345,8 +345,7 @@ func (r *Reconciler) pollPendingTemplates(stop <-chan struct{}) {
 			return
 		case <-ticker.C:
 			for _, state := range r.collections.Reconciliations.List() {
-				golden := state.ObservedActorTemplate.GetStatus().GetGoldenSnapshotStatus()
-				if state.Target != nil && state.PreparationFailure == nil && state.ObservedActorTemplate != nil && golden.GetGoldenTag() == nil {
+				if state.Target != nil && state.PreparationFailure == nil && state.ObservedActorTemplate != nil && !substrate.ActorTemplatePrepared(state.ObservedActorTemplate) {
 					r.agents.Add(state.ResourceName())
 				}
 			}
@@ -449,7 +448,7 @@ func (r *Reconciler) reconcileAgent(ctx context.Context, key string) error {
 		TokenPassthroughOrigins: target.Revision.TokenPassthroughOrigins,
 		ActorTemplateAtespace:   observed.GetMetadata().GetAtespace(), ActorTemplateName: observed.GetMetadata().GetName(), ActorTemplateUID: observed.GetMetadata().GetUid(),
 	}
-	ready := observed.GetStatus().GetGoldenSnapshotStatus().GetGoldenTag() != nil
+	ready := substrate.ActorTemplatePrepared(observed)
 	if err := r.store.RecordRuntimeRevision(ctx, revision, database.RecordRevisionOptions{Ready: ready}); err != nil {
 		return r.observePreparationError(*state, fmt.Errorf("store runtime revision %s: %w", target.RevisionID, err))
 	}

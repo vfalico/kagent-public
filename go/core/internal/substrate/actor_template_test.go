@@ -80,6 +80,8 @@ func TestActorTemplateSandboxClass(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, tt.wantClass, template.GetSandboxConfig().GetSandboxClass())
 			require.Equal(t, tt.wantConfig, template.GetSandboxConfig().GetConfigName())
+			require.False(t, template.GetSnapshotConfig().GetColdStartOnly())
+			require.False(t, ActorTemplatePrepared(template))
 			testWorkerPoolSelection(t, template, "agents", "pool")
 		})
 	}
@@ -247,4 +249,27 @@ func TestActorTemplateEnvironmentValueSize(t *testing.T) {
 			require.NotNil(t, template)
 		})
 	}
+}
+
+func TestActorTemplatePreparedDoesNotInventReadiness(t *testing.T) {
+	require.False(t, ActorTemplatePrepared(nil))
+	require.False(t, ActorTemplatePrepared(&ateapipb.ActorTemplate{}))
+	require.True(t, ActorTemplatePrepared(&ateapipb.ActorTemplate{Status: &ateapipb.ActorTemplateStatus{GoldenSnapshotStatus: &ateapipb.GoldenSnapshotStatus{GoldenTag: &ateapipb.ObjectRef{Atespace: "golden", Name: "actual"}}}}))
+}
+
+func TestColdStartOnlyIsExplicitImmutableRevisionInput(t *testing.T) {
+	spec := &translator.Revision{Namespace: "agents", AgentName: "cold", SandboxClass: atev1alpha1.SandboxClassMicroVM,
+		AgentCard: &a2apb.AgentCard{Name: "cold", Version: "v1", Capabilities: &a2apb.AgentCapabilities{}, SupportedInterfaces: []*a2apb.AgentInterface{{Url: "http://127.0.0.1:80", ProtocolBinding: "GRPC", ProtocolVersion: "1.0"}}, DefaultInputModes: []string{"text"}, DefaultOutputModes: []string{"text"}}}
+	original, err := spec.Digest()
+	require.NoError(t, err)
+	spec.ColdStartOnly = true
+	changed, err := spec.Digest()
+	require.NoError(t, err)
+	require.NotEqual(t, original, changed)
+	template, err := ActorTemplateForRevision(spec, changed)
+	require.NoError(t, err)
+	require.True(t, template.GetSnapshotConfig().GetColdStartOnly())
+	require.True(t, ActorTemplatePrepared(template))
+	template.SnapshotConfig.ColdStartOnly = false
+	require.False(t, ActorTemplatePrepared(template))
 }

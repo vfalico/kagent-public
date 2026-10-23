@@ -112,6 +112,7 @@ func (s *gatewayTestStore) CreateSession(_ context.Context, request *apiv1.Sessi
 	}
 	session := gatewayTestSession()
 	session.Id, session.ContextId, session.Agent, session.Creator = request.Id, request.Id, request.Agent, request.Creator
+	session.ExecutionRequirement = append([]byte(nil), request.GetExecutionRequirement()...)
 	s.created[key], s.session = session, session
 	return session, true, nil
 }

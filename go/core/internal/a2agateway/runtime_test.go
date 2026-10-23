@@ -30,6 +30,7 @@ func (a *runtimeTestAuth) UpstreamAuth(req *http.Request, _ auth.Session, _ auth
 	a.methods = append(a.methods, method)
 	req.Header.Set("Authorization", "Bearer runtime-test")
 	req.Header.Set("ate-target-actor", "wrong/actor")
+	req.Header.Set("ate-target-actor-uid", "caller-replacement")
 	return nil
 }
 
@@ -54,7 +55,7 @@ func TestRuntimeDialerRoutesUnaryAndStreamingCalls(t *testing.T) {
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 	authenticator := &runtimeTestAuth{}
-	dialer, err := NewRuntimeDialer("http://"+listener.Addr().String(), authenticator)
+	dialer, err := NewRuntimeDialer("http://"+listener.Addr().String(), authenticator, func(context.Context, string) (string, error) { return "persisted-uid", nil })
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
@@ -86,10 +87,20 @@ func TestRuntimeDialerRoutesUnaryAndStreamingCalls(t *testing.T) {
 		select {
 		case md := <-received:
 			require.Equal(t, []string{"team/session-session"}, md.Get("ate-target-actor"))
+			require.Equal(t, []string{"persisted-uid"}, md.Get("ate-target-actor-uid"))
 			require.Equal(t, []string{"Bearer runtime-test"}, md.Get("authorization"))
 			require.Equal(t, []string{listener.Addr().String()}, md.Get(":authority"))
 		case <-ctx.Done():
 			t.Fatal("runtime did not receive every call")
 		}
+	}
+}
+
+func TestGovernedDialRequiresPersistedUIDBeforeNetwork(t *testing.T) {
+	for _, identity := range []func(context.Context, string) (string, error){nil, func(context.Context, string) (string, error) { return "", nil }, func(context.Context, string) (string, error) { return "", status.Error(codes.NotFound, "gone") }} {
+		dialer, err := NewRuntimeDialer("http://127.0.0.1:1", &runtimeTestAuth{}, identity)
+		require.NoError(t, err)
+		_, err = dialer.Dial(t.Context(), &apiv1.Session{Id: "session", A2AAuthority: substrate.ActorHost("team", "actor", ""), ExecutionRequirement: []byte(`{"opaque":true}`)})
+		require.Error(t, err)
 	}
 }

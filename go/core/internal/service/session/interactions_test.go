@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"testing"
 	"time"
@@ -20,17 +21,22 @@ import (
 // permission tests fails immediately through the nil dependencies.
 type interactionTestStore struct {
 	*database.Client
-	task        *a2atype.Task
-	taskLookups int
-	taskReads   int
-	dispatchErr error
+	task              *a2atype.Task
+	taskLookups       int
+	taskReads         int
+	dispatchErr       error
+	reservedMessageID string
 }
 
-func (s *interactionTestStore) ReserveSessionDispatch(context.Context, string, uuid.UUID, string) error {
+func (s *interactionTestStore) ReserveSessionDispatch(_ context.Context, _ string, _ uuid.UUID, messageID string) error {
+	s.reservedMessageID = messageID
 	return s.dispatchErr
 }
 
+// Governed continuations deduplicate every message; policy-free legacy
+// continuation behavior is covered by TestRuntimeTaskStoreThroughGRPC.
 func TestPrepareSendStampsInboundTimeline(t *testing.T) {
+	requirement := []byte(`{"opaque":true}`)
 	for _, test := range []struct {
 		name     string
 		taskID   a2atype.TaskID
@@ -39,13 +45,14 @@ func TestPrepareSendStampsInboundTimeline(t *testing.T) {
 		{name: "opening"},
 		{name: "reply", taskID: "task"},
 		{name: "accepted retry", accepted: true},
+		{name: "accepted task continuation retry", taskID: "task", accepted: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			id := uuid.NewString()
 			agent := types.NamespacedName{Namespace: "team-a", Name: "assistant"}
 			stored := &apiv1.Session{Id: id, ContextId: id, State: apiv1.RuntimeState_RUNTIME_STATE_READY,
-				Operation: apiv1.RuntimeOperation_RUNTIME_OPERATION_NONE,
-				Agent:     &apiv1.ResourceReference{Namespace: agent.Namespace, Name: agent.Name}}
+				Operation: apiv1.RuntimeOperation_RUNTIME_OPERATION_NONE, ExecutionRequirement: requirement,
+				Agent: &apiv1.ResourceReference{Namespace: agent.Namespace, Name: agent.Name}}
 			original := a2atype.NewMessage(a2atype.MessageRoleUser, a2atype.NewTextPart("Approved"))
 			originalPosition := time.Now().Add(-time.Hour).UTC()
 			apia2a.SetTimelinePosition(original, originalPosition)
@@ -59,9 +66,12 @@ func TestPrepareSendStampsInboundTimeline(t *testing.T) {
 			message.ID, message.ContextID, message.TaskID = original.ID, id, test.taskID
 			apia2a.SetTimelinePosition(message, time.Unix(1, 0))
 			before := time.Now().UTC()
-			prepared, err := service.PrepareSend(serviceTestContext("alice"), agent, &a2atype.SendMessageRequest{Message: message})
+			prepared, err := service.PrepareSend(serviceTestContext("alice"), agent, &a2atype.SendMessageRequest{Message: message, Metadata: map[string]any{apia2a.ExecutionRequirementMetadataKey: base64.StdEncoding.EncodeToString(requirement)}})
 			if err != nil {
 				t.Fatal(err)
+			}
+			if tasks.reservedMessageID != original.ID {
+				t.Fatal("message acceptance check omitted for continuation", tasks.reservedMessageID)
 			}
 			if test.accepted {
 				position, ok := apia2a.TimelinePosition(prepared.AcceptedTask.History[0])

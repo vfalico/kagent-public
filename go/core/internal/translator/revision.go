@@ -59,6 +59,7 @@ type Revision struct {
 	WorkerPoolName   string
 	SandboxClass     atev1alpha1.SandboxClass
 	SnapshotLocation string
+	ColdStartOnly    bool
 
 	// Provenance records non-secret source configuration for diagnostics. Revision
 	// identity comes from compiled runtime inputs, not this source snapshot.
@@ -104,6 +105,7 @@ func (r *Revision) Digest() (RevisionID, error) {
 		SkillImages             []SkillImage             `json:"skillImages,omitempty"`
 		WorkerPoolName          string                   `json:"workerPoolName"`
 		SnapshotLocation        string                   `json:"snapshotLocation"`
+		ColdStartOnly           bool                     `json:"coldStartOnly,omitempty"`
 		Credentials             []egress.Credential      `json:"credentials,omitempty"`
 		TokenPassthroughOrigins []string                 `json:"tokenPassthroughOrigins,omitempty"`
 		EgressDestinations      []string                 `json:"egressDestinations"`
@@ -116,7 +118,7 @@ func (r *Revision) Digest() (RevisionID, error) {
 		AgentName: r.AgentName, AgentUID: r.AgentUID, Namespace: r.Namespace,
 		Image: r.Image, Command: r.Command, Args: r.Args, Environment: r.Environment, ConfigJSON: r.ConfigJSON,
 		SkillImages:    r.SkillImages,
-		WorkerPoolName: r.WorkerPoolName, SnapshotLocation: r.SnapshotLocation,
+		WorkerPoolName: r.WorkerPoolName, SnapshotLocation: r.SnapshotLocation, ColdStartOnly: r.ColdStartOnly,
 		TokenPassthroughOrigins: r.TokenPassthroughOrigins, Credentials: r.Credentials, EgressDestinations: r.EgressDestinations,
 		SandboxClass: sandboxClass, WorkerPoolNamespace: r.Namespace,
 	})

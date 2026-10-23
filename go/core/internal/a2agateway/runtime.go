@@ -30,11 +30,12 @@ type RuntimeDialer struct {
 	target        string
 	transport     credentials.TransportCredentials
 	authenticator auth.AuthProvider
+	actorUID      func(context.Context, string) (string, error)
 }
 
 // NewRuntimeDialer configures private A2A gRPC calls through Substrate's
 // shared Atenet router; ate-target-actor selects the Actor.
-func NewRuntimeDialer(routerURL string, authenticator auth.AuthProvider) (*RuntimeDialer, error) {
+func NewRuntimeDialer(routerURL string, authenticator auth.AuthProvider, identities ...func(context.Context, string) (string, error)) (*RuntimeDialer, error) {
 	router, err := url.Parse(routerURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse Atenet router URL %q: %w", routerURL, err)
@@ -54,10 +55,27 @@ func NewRuntimeDialer(routerURL string, authenticator auth.AuthProvider) (*Runti
 	default:
 		return nil, fmt.Errorf("atenet router URL %q must use http or https", routerURL)
 	}
-	return &RuntimeDialer{target: router.Host, transport: transport, authenticator: authenticator}, nil
+	d := &RuntimeDialer{target: router.Host, transport: transport, authenticator: authenticator}
+	if len(identities) > 1 {
+		return nil, fmt.Errorf("ambiguous runtime identity source")
+	}
+	if len(identities) == 1 {
+		d.actorUID = identities[0]
+	}
+	return d, nil
 }
 
 func (d *RuntimeDialer) Dial(ctx context.Context, session *apiv1.Session) (*a2aclient.Client, error) {
+	uid := ""
+	if d.actorUID != nil {
+		var err error
+		uid, err = d.actorUID(ctx, session.GetId())
+		if err != nil || uid == "" {
+			return nil, fmt.Errorf("persisted Actor identity unavailable")
+		}
+	} else if len(session.GetExecutionRequirement()) != 0 {
+		return nil, fmt.Errorf("governed routing requires persisted Actor identity")
+	}
 	targetActor, err := substrate.ActorTargetFromHost(session.GetA2AAuthority())
 	if err != nil {
 		return nil, err
@@ -74,7 +92,7 @@ func (d *RuntimeDialer) Dial(ctx context.Context, session *apiv1.Session) (*a2ac
 		),
 		a2aclient.WithCallInterceptors(
 			a2aext.NewClientPropagator(nil),
-			&upstreamAuthInterceptor{authenticator: d.authenticator, session: session, targetActor: targetActor},
+			&upstreamAuthInterceptor{authenticator: d.authenticator, session: session, targetActor: targetActor, actorUID: uid},
 		),
 	)
 }
@@ -87,6 +105,7 @@ type upstreamAuthInterceptor struct {
 	authenticator auth.AuthProvider
 	session       *apiv1.Session
 	targetActor   string
+	actorUID      string
 }
 
 func (u *upstreamAuthInterceptor) Before(ctx context.Context, req *a2aclient.Request) (context.Context, any, error) {
@@ -106,5 +125,9 @@ func (u *upstreamAuthInterceptor) Before(ctx context.Context, req *a2aclient.Req
 		}
 	}
 	req.ServiceParams["ate-target-actor"] = []string{u.targetActor}
+	delete(req.ServiceParams, "ate-target-actor-uid")
+	if u.actorUID != "" {
+		req.ServiceParams["ate-target-actor-uid"] = []string{u.actorUID}
+	}
 	return ctx, nil, nil
 }

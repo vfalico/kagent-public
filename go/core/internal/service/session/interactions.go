@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -137,9 +138,11 @@ func (s *InteractionService) ListTasks(ctx context.Context, agent types.Namespac
 }
 
 // PrepareSend authorizes and resolves the conversation, then reserves its input.
-// An initial-message retry returns its saved task without granting another send.
+// Governed accepted retries return saved tasks without granting another send.
+// Policy-free continuations retain the existing terminal-task behavior.
 func (s *InteractionService) PrepareSend(ctx context.Context, agent types.NamespacedName, req *a2atype.SendMessageRequest) (*PreparedSend, error) {
-	initialID := initialMessageID(req)
+	messageID := ""
+	initial := req != nil && req.Message != nil && req.Message.TaskID == "" && req.Message.ContextID == ""
 	pushConfig, err := initialPushConfig(agent, req, s.allowPushHTTP)
 	if err != nil {
 		return nil, err
@@ -147,6 +150,9 @@ func (s *InteractionService) PrepareSend(ctx context.Context, agent types.Namesp
 	session, err := s.resolveSend(ctx, agent, req)
 	if err != nil {
 		return nil, err
+	}
+	if len(session.GetExecutionRequirement()) != 0 || initial {
+		messageID = sendMessageID(req)
 	}
 	if pushConfig != nil {
 		if pushConfig.ID == "" {
@@ -159,13 +165,13 @@ func (s *InteractionService) PrepareSend(ctx context.Context, agent types.Namesp
 		config.PushConfig = nil
 		req.Config = &config
 	}
-	id, err := s.reserveDispatch(ctx, session.Id, initialID)
+	id, err := s.reserveDispatch(ctx, session.Id, messageID)
 	if errors.Is(err, database.ErrMessageAccepted) {
 		var historyLength *int
 		if req.Config != nil {
 			historyLength = req.Config.HistoryLength
 		}
-		task, err := s.acceptedTask(ctx, session.Id, initialID, historyLength)
+		task, err := s.acceptedTask(ctx, session.Id, messageID, historyLength)
 		if err != nil {
 			return nil, err
 		}
@@ -389,9 +395,17 @@ func (s *InteractionService) resolveSend(ctx context.Context, agent types.Namesp
 	if err := validateInteractionAgent(agent); err != nil {
 		return nil, err
 	}
+	requirement, err := apia2a.ExecutionRequirement(req)
+	if err != nil {
+		return nil, a2atype.NewError(a2atype.ErrInvalidParams, "invalid execution requirement carrier")
+	}
+	// Push delivery runs in an API worker outside the Actor's boundary. It
+	// cannot be added as an implicit exception to whole-execution authority.
+	if len(requirement) != 0 && req.Config != nil && req.Config.PushConfig != nil {
+		return nil, a2atype.NewError(a2atype.ErrUnsupportedOperation, "governed push delivery is unsupported")
+	}
 	apia2a.SanitizeCallerRequest(req)
 	var session *apiv1.Session
-	var err error
 	switch {
 	case req.Message.TaskID != "" || req.Message.ContextID != "":
 		session, err = s.messageSession(ctx, agent, req.Message)
@@ -401,13 +415,18 @@ func (s *InteractionService) resolveSend(ctx context.Context, agent types.Namesp
 		}
 		// Session creation already deduplicates request IDs per authenticated creator.
 		requestID := uuid.NewSHA1(uuid.NameSpaceURL, []byte("a2a/"+agent.Namespace+"/"+agent.Name+"/"+req.Message.ID)).String()
-		session, err = s.sessions.Create(ctx, &apiv1.ResourceReference{Namespace: agent.Namespace, Name: agent.Name}, requestID, "")
+		session, err = s.sessions.CreateWithRequirement(ctx, &apiv1.ResourceReference{Namespace: agent.Namespace, Name: agent.Name}, requestID, "", requirement)
 		if err != nil {
 			return nil, interactionError(ctx, err)
 		}
 	}
 	if err != nil {
 		return nil, err
+	}
+	// Every send, including a continuation and an accepted-message retry, must
+	// present the exact persisted authority. Omission is not a policy-free retry.
+	if !bytes.Equal(requirement, session.GetExecutionRequirement()) {
+		return nil, a2atype.NewError(a2atype.ErrInvalidRequest, "execution requirement differs from Session")
 	}
 	if req.Message.ContextID != "" && req.Message.ContextID != session.ContextId {
 		return nil, a2atype.NewError(a2atype.ErrInvalidRequest, "message context does not match task")
@@ -490,8 +509,8 @@ func (s *InteractionService) listSessions(ctx context.Context, agent types.Names
 	}
 }
 
-func initialMessageID(req *a2atype.SendMessageRequest) string {
-	if req != nil && req.Message != nil && req.Message.ContextID == "" && req.Message.TaskID == "" {
+func sendMessageID(req *a2atype.SendMessageRequest) string {
+	if req != nil && req.Message != nil {
 		return req.Message.ID
 	}
 	return ""

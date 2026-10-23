@@ -100,7 +100,7 @@ func (s *SandboxReconciler) pollPending(ctx context.Context, preparations, statu
 					statuses.Add(state.ResourceName())
 				}
 				if !state.Template.DeletionTimestamp.IsZero() || !slices.Contains(state.Template.Finalizers, sandboxPreparationFinalizer) ||
-					(state.Failure != nil && state.Failure.Retryable) || (state.canPrepare() && state.ObservedActorTemplate.GetStatus().GetGoldenSnapshotStatus().GetGoldenTag() == nil) {
+					(state.Failure != nil && state.Failure.Retryable) || (state.canPrepare() && !substrate.ActorTemplatePrepared(state.ObservedActorTemplate)) {
 					preparations.Add(state.ResourceName())
 				}
 			}
@@ -187,7 +187,7 @@ func (s *SandboxReconciler) reconcile(ctx context.Context, key string) error {
 	if message := observed.GetStatus().GetGoldenSnapshotStatus().GetErrorMessage(); message != "" {
 		return s.observeError(*state, fmt.Errorf("sandbox golden snapshot failed: %s", message), true)
 	}
-	ready := observed.GetStatus().GetGoldenSnapshotStatus().GetGoldenTag() != nil
+	ready := substrate.ActorTemplatePrepared(observed)
 	revision := database.SandboxRevision{
 		RuntimeArtifact: database.RuntimeArtifact{Revision: state.RevisionID, Kind: "sandbox", Namespace: state.Template.Namespace,
 			ActorTemplateAtespace: ref.GetAtespace(), ActorTemplateName: ref.GetName(), ActorTemplateUID: observed.GetMetadata().GetUid()},
@@ -236,7 +236,7 @@ func sandboxStatusWithTransitionTimes(state sandboxReconciliation) kagentv1alpha
 	condition := metav1.Condition{Type: "Ready", Status: metav1.ConditionFalse, Reason: "Preparing", Message: "Waiting for the prepared sandbox snapshot", ObservedGeneration: state.Template.Generation}
 	if state.Failure != nil {
 		condition.Reason, condition.Message = state.Failure.Reason, state.Failure.Message
-	} else if state.ObservedActorTemplate.GetStatus().GetGoldenSnapshotStatus().GetGoldenTag() != nil {
+	} else if substrate.ActorTemplatePrepared(state.ObservedActorTemplate) {
 		condition.Status, condition.Reason, condition.Message = metav1.ConditionTrue, "Prepared", "Sandbox runtime is prepared"
 	}
 	desired.ObservedGeneration = state.Template.Generation

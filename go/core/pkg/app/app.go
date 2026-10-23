@@ -339,6 +339,7 @@ func Run(ctx context.Context, input *configv1.ControllerConfig, opts Options) er
 	gatewayDialer, err := a2agateway.NewRuntimeDialer(
 		cfg.GetSubstrate().GetRouterUrl(),
 		authenticator,
+		store.SessionActorUID,
 	)
 	if err != nil {
 		return err

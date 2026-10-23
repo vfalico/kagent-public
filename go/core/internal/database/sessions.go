@@ -1,6 +1,7 @@
 package database
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -49,7 +50,7 @@ func marshalSession(session *apiv1.Session) ([]byte, error) {
 
 // sameSessionRequest reports whether two creation requests target the same Agent. Names and other mutable fields do not affect retry identity.
 func sameSessionRequest(session, request *apiv1.Session) bool {
-	return proto.Equal(session.GetAgent(), request.GetAgent())
+	return proto.Equal(session.GetAgent(), request.GetAgent()) && bytes.Equal(session.GetExecutionRequirement(), request.GetExecutionRequirement())
 }
 
 // CreateSession atomically reserves a session, its conversation history, and the
@@ -322,4 +323,18 @@ func releaseAgentRuntimeReferences(ctx context.Context, tx pgx.Tx, id uuid.UUID)
 		return err
 	}
 	return execSQL(ctx, tx, `DELETE FROM session_share WHERE session_id = $1`, id)
+}
+
+// SessionActorUID reads only the persisted runtime identity. It is an internal
+// routing precondition, never caller metadata or an authorization grant.
+func (c *Client) SessionActorUID(ctx context.Context, id string) (string, error) {
+	var uid string
+	err := c.db.QueryRow(ctx, `SELECT COALESCE(actor_uid,'') FROM session_record WHERE id=$1 AND state <> 'RUNTIME_STATE_DELETED'`, id).Scan(&uid)
+	if err != nil {
+		return "", notFoundOr(err)
+	}
+	if uid == "" {
+		return "", ErrFailedPrecondition
+	}
+	return uid, nil
 }
